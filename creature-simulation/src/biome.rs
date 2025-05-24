@@ -73,6 +73,45 @@ impl BiomeType {
         }
     }
 
+    pub fn to_id(&self) -> u8 {
+        match self {
+            BiomeType::Ocean => 0,
+            BiomeType::Coastal => 1,
+            BiomeType::Desert => 2,
+            BiomeType::Savanna => 3,
+            BiomeType::Grasslands => 4,
+            BiomeType::Forest => 5,
+            BiomeType::TropicalRainforest => 6,
+            BiomeType::Mountain => 7,
+            BiomeType::Alpine => 8,
+            BiomeType::Tundra => 9,
+            BiomeType::Wetlands => 10,
+            BiomeType::Caves => 11,
+            BiomeType::Volcanic => 12,
+            BiomeType::Badlands => 13,
+        }
+    }
+
+    pub fn from_id(id: u8) -> Self {
+        match id {
+            0 => BiomeType::Ocean,
+            1 => BiomeType::Coastal,
+            2 => BiomeType::Desert,
+            3 => BiomeType::Savanna,
+            4 => BiomeType::Grasslands,
+            5 => BiomeType::Forest,
+            6 => BiomeType::TropicalRainforest,
+            7 => BiomeType::Mountain,
+            8 => BiomeType::Alpine,
+            9 => BiomeType::Tundra,
+            10 => BiomeType::Wetlands,
+            11 => BiomeType::Caves,
+            12 => BiomeType::Volcanic,
+            13 => BiomeType::Badlands,
+            _ => BiomeType::Ocean, // Default fallback
+        }
+    }
+
     pub fn can_transition_to(&self, other: &BiomeType) -> bool {
         match (self, other) {
             (BiomeType::Ocean, BiomeType::Coastal) => true,
