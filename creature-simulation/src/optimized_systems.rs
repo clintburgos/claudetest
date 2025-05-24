@@ -2,11 +2,14 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, Duration};
 use crate::world::{WorldMap, WorldGenerator, WORLD_SIZE};
 use crate::biome::BiomeType;
 use crate::environment::{EnvironmentSprite, SwayAnimation, EnvironmentType, get_environment_elements};
 use crate::render::{WorldTile, TILE_SIZE};
 use crate::optimization::*;
+use crate::loading::LoadingState;
 
 pub struct OptimizationPlugin;
 
@@ -29,34 +32,99 @@ impl Plugin for OptimizationPlugin {
 
 // === ASYNC WORLD GENERATION ===
 pub fn start_world_generation(mut commands: Commands) {
-    debug!("Starting world generation...");
+    let start_time = Instant::now();
+    info!("⏱️ TIMING: Starting world generation at {:?}", start_time);
+    
     let task_pool = AsyncComputeTaskPool::get();
+    
+    // Create progress tracker
+    let progress_tracker = Arc::new(Mutex::new((0.0, "🌍 Initializing world...".to_string())));
+    let progress_tracker_clone = Arc::clone(&progress_tracker);
+    
     let task = task_pool.spawn(async move {
-        debug!("World generation task started in background thread");
+        let gen_start = Instant::now();
+        info!("⏱️ TIMING: World generation task started in background thread at {:?}", gen_start);
+        
         let generator = WorldGenerator::new(Some(12345));
-        debug!("Generating world map...");
-        let world_map = generator.generate_world();
-        debug!("World generation completed!");
+        let noise_setup_time = gen_start.elapsed();
+        info!("⏱️ TIMING: Noise setup took: {:?}", noise_setup_time);
+        
+        let map_gen_start = Instant::now();
+        info!("⏱️ TIMING: Starting world map generation at {:?}", map_gen_start);
+        
+        // Create progress callback with timing
+        let progress_callback: Box<dyn Fn(f32, &str) + Send + Sync> = Box::new(move |progress: f32, message: &str| {
+            if let Ok(mut tracker) = progress_tracker_clone.lock() {
+                tracker.0 = progress * 0.7; // Scale to 0-70% of total progress
+                tracker.1 = message.to_string();
+                info!("⏱️ TIMING: Progress {:.1}% - {} (elapsed: {:?})", 
+                      progress * 100.0, message, map_gen_start.elapsed());
+            }
+        });
+        
+        let world_map = generator.generate_world_with_progress(Some(progress_callback));
+        let map_gen_time = map_gen_start.elapsed();
+        info!("⏱️ TIMING: World map generation completed! Took: {:?}", map_gen_time);
         world_map
     });
-    commands.spawn(WorldGenerationTask(task));
-    debug!("World generation task spawned");
+    
+    commands.spawn(WorldGenerationTask {
+        task,
+        progress_tracker,
+    });
+    
+    let spawn_time = start_time.elapsed();
+    info!("⏱️ TIMING: World generation task spawned in: {:?}", spawn_time);
 }
 
 fn check_world_generation_system(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut WorldGenerationTask)>,
+    mut loading_state: ResMut<LoadingState>,
+    time: Res<Time>,
 ) {
-    for (entity, mut task) in tasks.iter_mut() {
-        if let Some(world_map) = future::block_on(future::poll_once(&mut task.0)) {
-            debug!("World generation task completed! Converting to compressed format...");
+    // Update loading progress from the progress tracker
+    for (entity, mut task_wrapper) in tasks.iter_mut() {
+        // Get progress from the shared tracker
+        if let Ok(tracker) = task_wrapper.progress_tracker.lock() {
+            let (progress, message) = tracker.clone();
+            loading_state.progress = (loading_state.progress * 0.9 + progress * 0.1).max(progress); // Smooth progress
+            loading_state.current_message = message;
+        }
+        
+        if let Some(world_map) = future::block_on(future::poll_once(&mut task_wrapper.task)) {
+            let compression_start = Instant::now();
+            info!("⏱️ TIMING: World generation task completed! Starting compression at {:?}", compression_start);
+            
+            // Update loading to 75%
+            loading_state.progress = 0.75;
+            loading_state.current_message = "🗜️ Compressing world data...".to_string();
+            
             // Convert to compressed format
             let compressed_data = CompressedWorldData::from_world_map(&world_map);
-            debug!("Compressed data created. Inserting resources...");
+            let compression_time = compression_start.elapsed();
+            info!("⏱️ TIMING: World compression took: {:?}", compression_time);
+            
+            let resource_insert_start = Instant::now();
+            info!("⏱️ TIMING: Starting resource insertion at {:?}", resource_insert_start);
+            
+            // Update loading to 80%
+            loading_state.progress = 0.8;
+            loading_state.current_message = "🎨 Preparing the canvas...".to_string();
+            
             commands.insert_resource(compressed_data);
             commands.insert_resource(world_map);
             commands.entity(entity).despawn();
-            debug!("World map resource inserted! Ready to render.");
+            
+            let resource_insert_time = resource_insert_start.elapsed();
+            info!("⏱️ TIMING: Resource insertion took: {:?}", resource_insert_time);
+            
+            // Mark world as ready and start rendering phase
+            loading_state.progress = 0.72;
+            loading_state.world_ready = true;
+            loading_state.current_message = "📐 Calculating camera position...".to_string();
+            
+            info!("⏱️ TIMING: World map resource inserted! Ready to render.");
         }
     }
 }
@@ -69,24 +137,30 @@ pub fn optimized_render_world_tiles(
     mut chunk_manager: ResMut<ChunkManager>,
     existing_tiles: Query<Entity, With<WorldTile>>,
     existing_environment: Query<Entity, With<EnvironmentSprite>>,
+    mut loading_state: ResMut<LoadingState>,
+    time: Res<Time>,
 ) {
     let Some(world_map) = world_map else { 
-        // Only log this occasionally to avoid spam
-        static mut COUNTER: u32 = 0;
-        unsafe {
-            COUNTER += 1;
-            if COUNTER % 60 == 1 { // Log once per second at 60fps
-                debug!("Waiting for world map resource...");
-            }
+        // Update loading message while waiting for world
+        if loading_state.world_ready {
+            loading_state.current_message = "⏳ Waiting for world data...".to_string();
+            loading_state.progress = 0.74;
         }
         return; 
     };
+    
     let Ok(camera_transform) = camera_query.get_single() else { 
-        debug!("Camera not found!");
+        if loading_state.world_ready {
+            loading_state.current_message = "📷 Setting up camera...".to_string();
+            loading_state.progress = 0.76;
+        }
         return;
     };
 
     if world_map.is_changed() {
+        loading_state.current_message = "🧹 Clearing previous world...".to_string();
+        loading_state.progress = 0.78;
+        
         debug!("World map changed! Clearing existing entities...");
         // Clear all existing entities
         for entity in existing_tiles.iter() {
@@ -97,6 +171,12 @@ pub fn optimized_render_world_tiles(
         }
         chunk_manager.loaded_chunks.clear();
         debug!("Cleared {} tiles and {} environment entities", existing_tiles.iter().count(), existing_environment.iter().count());
+    }
+
+    // Update loading for chunk calculation phase
+    if loading_state.world_ready && !loading_state.first_frame_rendered {
+        loading_state.current_message = "🗺️ Calculating visible areas...".to_string();
+        loading_state.progress = 0.8;
     }
 
     // Calculate visible chunks
@@ -124,22 +204,56 @@ pub fn optimized_render_world_tiles(
     // Update active chunks
     chunk_manager.active_chunks = visible_chunks.clone();
 
-    // Load new chunks
+    // Load new chunks with progress tracking
     debug!("Loading new chunks...");
     let mut chunks_loaded = 0;
-    for chunk_coord in visible_chunks {
-        if !chunk_manager.loaded_chunks.contains_key(&chunk_coord) {
+    let total_chunks_to_load = visible_chunks.len() - chunk_manager.loaded_chunks.len();
+    
+    for (i, chunk_coord) in visible_chunks.iter().enumerate() {
+        if !chunk_manager.loaded_chunks.contains_key(chunk_coord) {
             debug!("Loading chunk {:?}", chunk_coord);
-            let entities = render_chunk(&mut commands, &world_map, chunk_coord);
+            let entities = render_chunk(&mut commands, &world_map, *chunk_coord);
             debug!("Chunk {:?} loaded with {} entities", chunk_coord, entities.len());
-            chunk_manager.loaded_chunks.insert(chunk_coord, ChunkData {
+            chunk_manager.loaded_chunks.insert(*chunk_coord, ChunkData {
                 entities,
                 is_loaded: true,
             });
             chunks_loaded += 1;
+            
+            // Update loading progress for rendering phase
+            if loading_state.world_ready && !loading_state.first_frame_rendered {
+                let render_progress = chunks_loaded as f32 / total_chunks_to_load.max(1) as f32;
+                loading_state.progress = 0.82 + (render_progress * 0.18); // 82-100%
+                
+                let render_messages = [
+                    "🎨 Painting the landscape...",
+                    "🖌️ Adding environmental details...", 
+                    "🌿 Placing vegetation...",
+                    "🏔️ Positioning mountain ranges...",
+                    "🌊 Filling water bodies...",
+                    "✨ Final touches and polish...",
+                ];
+                let message_index = ((render_progress * render_messages.len() as f32) as usize)
+                    .min(render_messages.len() - 1);
+                loading_state.current_message = render_messages[message_index].to_string();
+                
+                info!("⏱️ TIMING: Rendering progress: {:.1}% - {} (chunk {}/{})", 
+                      render_progress * 100.0, render_messages[message_index], chunks_loaded, total_chunks_to_load);
+            }
         }
     }
     debug!("Loaded {} new chunks", chunks_loaded);
+    
+    // Mark first frame as rendered if we have any chunks loaded
+    if chunks_loaded > 0 && loading_state.world_ready && !loading_state.first_frame_rendered {
+        let render_complete_time = Instant::now();
+        info!("⏱️ TIMING: First frame rendered! Loading complete at {:?}", render_complete_time);
+        
+        loading_state.first_frame_rendered = true;
+        loading_state.progress = 1.0;
+        loading_state.is_complete = true;
+        loading_state.current_message = "🎉 Welcome to your new world! 🎉".to_string();
+    }
 }
 
 fn render_chunk(
@@ -147,7 +261,8 @@ fn render_chunk(
     world_map: &WorldMap,
     chunk_coord: (i32, i32),
 ) -> Vec<Entity> {
-    debug!("Rendering chunk {:?}", chunk_coord);
+    let chunk_render_start = Instant::now();
+    debug!("⏱️ TIMING: Rendering chunk {:?} at {:?}", chunk_coord, chunk_render_start);
     let mut entities = Vec::new();
     let (start_x, start_y, end_x, end_y) = chunk_to_world_bounds(chunk_coord.0, chunk_coord.1);
     debug!("Chunk bounds: ({}, {}) to ({}, {})", start_x, start_y, end_x, end_y);
@@ -229,6 +344,8 @@ fn render_chunk(
         }
     }
 
+    let chunk_render_time = chunk_render_start.elapsed();
+    debug!("⏱️ TIMING: Chunk {:?} rendered in {:?} with {} entities", chunk_coord, chunk_render_time, entities.len());
     entities
 }
 

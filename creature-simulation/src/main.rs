@@ -4,35 +4,67 @@ mod render;
 mod environment;
 mod optimization;
 mod optimized_systems;
+mod loading;
 
 use bevy::prelude::*;
+use std::time::Instant;
 use world::{WorldGenerator, WorldMap, WORLD_SIZE};
 use render::RenderPlugin;
 use environment::EnvironmentPlugin;
 use optimized_systems::{OptimizationPlugin, start_world_generation, optimized_render_world_tiles};
+use loading::LoadingPlugin;
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Creature Simulation".into(),
-                resolution: (1200.0, 800.0).into(),
-                ..default()
-            }),
+    let app_start = Instant::now();
+    println!("⏱️ TIMING: Application startup began at {:?}", app_start);
+    
+    let plugin_setup_start = Instant::now();
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Creature Simulation".into(),
+            resolution: (1200.0, 800.0).into(),
             ..default()
-        }))
-        .add_plugins(RenderPlugin)
-        .add_plugins(EnvironmentPlugin)
-        .add_plugins(OptimizationPlugin)
-        .add_systems(Startup, (setup_camera, start_world_generation))
-        .add_systems(Update, optimized_render_world_tiles)
-        .run();
+        }),
+        ..default()
+    }));
+    
+    let default_plugins_time = plugin_setup_start.elapsed();
+    println!("⏱️ TIMING: Default plugins setup took: {:?}", default_plugins_time);
+    
+    let custom_plugins_start = Instant::now();
+    app.add_plugins(RenderPlugin);
+    app.add_plugins(EnvironmentPlugin);
+    app.add_plugins(OptimizationPlugin);
+    app.add_plugins(LoadingPlugin);
+    
+    let custom_plugins_time = custom_plugins_start.elapsed();
+    println!("⏱️ TIMING: Custom plugins setup took: {:?}", custom_plugins_time);
+    
+    let systems_setup_start = Instant::now();
+    app.add_systems(Startup, (setup_camera, start_world_generation));
+    app.add_systems(Update, optimized_render_world_tiles);
+    
+    let systems_setup_time = systems_setup_start.elapsed();
+    println!("⏱️ TIMING: Systems setup took: {:?}", systems_setup_time);
+    
+    let total_setup_time = app_start.elapsed();
+    println!("⏱️ TIMING: Total app setup took: {:?}", total_setup_time);
+    println!("⏱️ TIMING: Starting app.run()...");
+    
+    app.run();
 }
 
-fn setup_camera(mut commands: Commands) {
-    debug!("Setting up camera...");
+fn setup_camera(mut commands: Commands, mut loading_state: ResMut<loading::LoadingState>) {
+    let camera_setup_start = Instant::now();
+    info!("⏱️ TIMING: Setting up camera at {:?}", camera_setup_start);
     commands.spawn(Camera2dBundle::default());
-    debug!("Camera spawned!");
+    let camera_setup_time = camera_setup_start.elapsed();
+    info!("⏱️ TIMING: Camera setup took: {:?}", camera_setup_time);
+    
+    // Initial loading progress
+    loading_state.progress = 0.1;
+    loading_state.current_message = "📷 Setting up camera systems...".to_string();
 }
 
 // Simple fallback render system to test if the basic rendering works

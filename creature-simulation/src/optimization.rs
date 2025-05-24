@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
+use std::sync::{Arc, Mutex};
 use crate::world::{WorldMap, WorldGenerator, WORLD_SIZE};
 use crate::environment::EnvironmentType;
 
@@ -183,7 +184,10 @@ pub struct InstancedSprites {
 
 // === ASYNC WORLD GENERATION ===
 #[derive(Component)]
-pub struct WorldGenerationTask(pub Task<WorldMap>);
+pub struct WorldGenerationTask {
+    pub task: Task<WorldMap>,
+    pub progress_tracker: Arc<Mutex<(f32, String)>>,
+}
 
 // === UTILITY FUNCTIONS ===
 pub fn calculate_visible_chunks(camera_pos: Vec3) -> Vec<(i32, i32)> {
